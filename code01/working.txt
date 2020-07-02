@@ -1,0 +1,375 @@
+/* A Program for Instrumentation and Sensing of a Medical Ventillator:
+External Peripherals : Pressure Sensor BMP280, MPX7002DP
+Author        : Sadik shahriar
+Project Lead  : Faruk Hannan
+Board         : Arduino Mega2560
+Date          : 6th April, 2020
+Crystal       : 16 MHz 
+*/
+//####################################################################
+// Libraries to include and PIN Mapping
+//####################################################################
+#include <Wire.h>
+#include <SPI.h>
+#include <DHT.h>;
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BMP280.h>
+#include <Adafruit_BME280.h>
+#include <ArduinoJson.h>
+#include <pt.h>
+
+// Enclosed (BME280) ambient Sensor_1 Pin Config 
+#define BMP_SCK_1 2        //  SCL -> Uno 13, Mega 4
+#define BMP_MOSI_1 3       //  SDA -> Uno 11, Mega 5
+#define BMP_CS_1 5         //  CSB -> Uno 10, Mega 2
+#define BMP_MISO_1 4       //  SDO -> Uno 12, Mega 3
+
+//  Ambient Sensor_1 RED Pin Config
+#define BMP_SCK_2 22        //  SCL -> Uno 13, Mega 4
+#define BMP_MOSI_2 24       //  SDA -> Uno 11, Mega 5 
+#define BMP_CS_2 26         //  CSB -> Uno 10, Mega 2
+#define BMP_MISO_2 28       //  SDO -> Uno 12, Mega 3
+
+//  Entrapped Sensor_2 BLUE Pin Config
+#define BME_SCK_2 53        //  SCL -> Uno 13, Mega 14
+#define BME_MISO_2 52       //  SDO -> Uno 12, Mega 18
+#define BME_MOSI_2 51       //  SDA -> Uno 11, Mega 15
+#define BME_CS_2 50         //  CSB -> Uno 10, Mega 19
+
+// Other Pin Mappings 
+#define MPXsensorPin A0     //  MPX7002DP output connected to A0;
+#define BuzzerPin 13        //  Buzzer connected at Pin 13
+
+
+////////////////////////////////////////////////
+#define DHTPIN 49           // what pin we're connected to
+#define DHTTYPE DHT22       // DHT 22  (AM2302)
+DHT dht(DHTPIN, DHTTYPE);   // Initialize DHT sensor for normal 16mhz Arduino
+int chk;                    //  DHT Sensor Variables
+float hum = 0.0;                //  Stores humidity value
+float temp = 0.0;                 //  Stores temperature value
+String mystring;
+
+///////////////////////////////////////
+
+
+
+//####################################################################
+//  Variables, Constants and Function Declaration
+//####################################################################
+const int bus1 = 11, bus2 = 12, power = 9 ; //buzzer to arduino pin 9
+float MPX_milibar = 0.0, MPX_max_Pressure = 15.0;
+//float sensorValue=0,sensorMax=1023,sensorOffset=-10;
+float pressure_1, pressure_2, pressure_3, p_bmp_delta;
+float p_bmp_ref , p_amb, p_dut;
+
+float volume_factor = 75.36, motor_enable=0;    // Volume Factor = Time in millisecond to fill 1 millimeter volume
+float new_peep_level= 4, set_peep_level= 4, sensitivity = 0.5, motor_status = 0; ///////////////////////////////////////////////////// water column in cmH2O
+//unsigned long previousTimePump = millis();
+long runtime;
+
+
+//////////////////////
+
+const byte numChars = 32;
+char receivedChars[numChars];
+char tempChars[numChars];        // temporary array for use when parsing
+
+      // variables to hold the parsed data
+char messageFromPC[numChars] = {0};
+int integerFromPC = 0;
+float floatFromPC_1 = 0.0;
+float floatFromPC_2 = 0.0;
+boolean newData = false;
+
+//////////////////////////
+
+
+Adafruit_BMP280 bmp_1 (BMP_CS_1, BMP_MOSI_1, BMP_MISO_1,  BMP_SCK_1);
+Adafruit_BMP280 bmp_2 (BMP_CS_2, BMP_MOSI_2, BMP_MISO_2,  BMP_SCK_2);
+Adafruit_BME280 bme_2 (BME_CS_2, BME_MOSI_2, BME_MISO_2,  BME_SCK_2);
+
+// Declare 3 protothreads
+static struct pt pt1, pt2, pt3, pt4;
+//####################################################################
+// Task 1: Subroutine to SerialPrint the pressure sensor value 
+//####################################################################
+static int MPX7002DP_Value_Print(struct pt *pt)
+{
+  static unsigned long lastTimePrint = 0;
+  //static float  Pressure_in_millibar = 0.0;
+  static float  Pressure_in_kPa = 0.0;
+  PT_BEGIN(pt);
+  while(1) {
+    lastTimePrint = millis();
+    PT_WAIT_UNTIL(pt, millis() - lastTimePrint > 500);
+    int Pressure_Sensor_Value = analogRead(MPXsensorPin);
+    if (Pressure_Sensor_Value < 102) {
+      Pressure_in_kPa = -2.0;
+    } 
+    else {
+      if (Pressure_Sensor_Value > 921) {
+        Pressure_in_kPa = 2.0;
+      } 
+      else {  
+        // Syntax : map(value, fromLow, fromHigh, toLow, toHigh)
+        Pressure_in_kPa = map(Pressure_Sensor_Value, 102, 921, -2000, 2000)/1000.0;   
+      }
+    }
+    MPX_milibar = Pressure_in_kPa * 10;
+    //Serial.print("MPX Value: ");
+    set_peep_level = MPX_milibar;
+    Serial.println(MPX_milibar);
+  }
+  PT_END(pt);
+}
+//####################################################################
+// Task 2: Subroutine to activate Buzzer every other second
+//####################################################################
+static int BuzzBeep(struct pt *pt)
+{
+  static unsigned long lastTimeBuzz = 0;
+  
+  PT_BEGIN(pt);
+  while(1) {
+    lastTimeBuzz = millis();
+    PT_WAIT_UNTIL(pt, millis() - lastTimeBuzz > 1000);
+    digitalWrite(BuzzerPin, HIGH);
+    Serial.print("Buzzer start");
+    lastTimeBuzz = millis();
+    PT_WAIT_UNTIL(pt, millis() - lastTimeBuzz > 1000);
+    digitalWrite(BuzzerPin, LOW);  
+    Serial.print("Buzzer stopped");    
+  }
+  PT_END(pt);
+}
+//####################################################################
+// Task 3: Subroutine to Stop the Pump after runtime passes   
+//####################################################################
+static int Peep_Pressure_Set(struct pt *pt)
+{
+  static unsigned long lastRunTime = 0;
+  PT_BEGIN(pt);
+  while(1) {
+    lastRunTime = millis();
+    PT_WAIT_UNTIL(pt, millis() - lastRunTime > runtime);
+    digitalWrite(bus1, HIGH);
+    digitalWrite(bus2, HIGH);
+    digitalWrite(power, HIGH);
+    //set_peep_level = new_peep_level;  
+    set_peep_level = MPX_milibar;
+    motor_status = 0;
+    Serial.println("Motor Stopped");      
+  }
+  PT_END(pt);
+}
+//####################################################################
+// Task 4: Subroutine to parse Serial Input continuously  
+//####################################################################
+static int Serial_Input_Parsing(struct pt *pt)
+{
+  static unsigned long lastTimeCheck = 0;
+  
+  PT_BEGIN(pt);
+  while(1) {
+    lastTimeCheck = millis();
+    PT_WAIT_UNTIL(pt, millis() - lastTimeCheck > 5);
+    recvWithStartEndMarkers();
+    if (newData == true) {
+      strcpy(tempChars, receivedChars);
+        // this temporary copy is necessary to protect the original data
+        //   because strtok() used in parseData() replaces the commas with \0
+      parseData();
+      showParsedData();
+      newData = false;
+      
+      new_peep_level = floatFromPC_1;
+      motor_enable = 1;
+      //BMP_max = floatFromPC_2;
+      MPX_max_Pressure = floatFromPC_2;
+    }
+  }
+  PT_END(pt);
+}
+//####################################################################
+
+//####################################################################
+
+
+void setup() {
+  bmp_1.begin();
+  bmp_2.begin();
+  
+  Serial.begin(115200);
+  Serial.println("Start:");
+  
+  pinMode(BuzzerPin, OUTPUT); // Set buzzer - pin 9 as an output
+  pinMode(bus1, OUTPUT); 
+  pinMode(bus2, OUTPUT);  // Set buzzer - pin 9 as an output
+  pinMode(power, OUTPUT); // Set buzzer - pin 9 as an output
+  
+  digitalWrite(bus1, HIGH);   //  Relay BUS1
+  digitalWrite(bus2, HIGH);   //  Relay BUS2
+  digitalWrite(power, HIGH);  //  Relay Power
+  
+  digitalWrite(BuzzerPin, LOW);
+  delay(1000);
+
+  PT_INIT(&pt1);
+  PT_INIT(&pt2);
+  PT_INIT(&pt3);
+  PT_INIT(&pt4);
+
+  MPX7002DP_Value_Print(&pt1);
+//  set_peep_level = MPX_milibar;
+//  new_peep_level = MPX_milibar;
+//  delay(1000);
+} 
+//####################################################################  
+
+//####################################################################
+void loop(){
+//  StaticJsonDocument<200> doc;              // Json encoding file
+
+  MPX7002DP_Value_Print(&pt1);                // Subroutine to print presure value
+  
+  if (MPX_max_Pressure < MPX_milibar){
+    BuzzBeep(&pt2);                             // Checking if any of the pressure value exceeds the mark
+  }
+  
+  Serial_Input_Parsing(&pt3);                 // Serial Input change monitoring
+  
+  
+  
+  if ((new_peep_level > (set_peep_level + sensitivity))&& motor_enable){
+      runtime = volume_factor *(new_peep_level-set_peep_level) * 10;  // CM to mm, millisecond
+      digitalWrite(bus1, LOW);
+      digitalWrite(bus2, LOW);
+      digitalWrite(power, LOW);
+//      Serial.print(set_peep_level);
+//      Serial.print("\t");
+//      Serial.println(new_peep_level);
+      Serial.println("Motor Flooding");
+      //Peep_Pressure_Set(&pt4);
+      motor_status = 1;
+      
+    }  
+  if ((new_peep_level < (set_peep_level - sensitivity))&& motor_enable){
+      runtime = volume_factor *(set_peep_level-new_peep_level) * 10;  // CM to mm, millisecond
+      digitalWrite(bus1, HIGH);
+      digitalWrite(bus2, HIGH);
+      digitalWrite(power, LOW);
+//      Serial.print(set_peep_level);
+//      Serial.print("\t");
+//      Serial.println(new_peep_level);
+      Serial.println("Motor Draining");
+      motor_status = 1;   
+    }
+    
+    
+    if (motor_status == 1){
+      Peep_Pressure_Set(&pt4);
+    }
+      
+  //
+  
+
+  
+    
+//  pressure_1 = bmp_1.readPressure();
+//  p_bmp_ref = pressure_1/100;        // Inside Pressure in Milibar 
+//  pressure_2 = bmp_2.readPressure();
+//  p_amb = pressure_2/100;        // Ambient Pressure in Milibar
+//  pressure_3 = bme_2.readPressure();
+//  p_dut = pressure_2/100;        // Ambient Pressure in Milibar
+//  
+//  p_bmp_delta = p_bmp_ref - p_amb;
+  
+  //Serial.print(p_bmp_delta+1.7);
+  //Serial.print("\t");
+  
+    //Serial.print(p_bmp_ref-1008.8);
+    //Serial.print("\t");
+  //  Serial.print(p_amb);
+  //  Serial.print("\t");
+  //  Serial.print(p_dut);
+  //  Serial.print("\t");
+
+  //Serial.print(MPX_milibar); // print milibar
+  //Serial.print("\t");
+  
+//  mystring = String(p_amb);
+//  doc["ambient"] = mystring ;
+//  mystring = String(p_bmp_delta);
+//  doc["pdelta"] = mystring;
+
+//  hum = dht.readHumidity();
+//  temp = dht.readTemperature();
+//  mystring = String(hum);
+//  doc["humidity"] = mystring;
+//  mystring = String(temp);
+//  doc["temperature"] = mystring;
+  //mystring = String(peak_pressure_alarm);
+  //doc["peakpressure_alarm"] = mystring;
+  //doc["peakpressure_limit"] = "35";
+
+  //serializeJson(doc, Serial);
+  //serializeJsonPretty (doc, Serial);
+  
+}
+
+void recvWithStartEndMarkers() {
+    static boolean recvInProgress = false;
+    static byte ndx = 0;
+    char startMarker = '<';
+    char endMarker = '>';
+    char rc;
+
+    while (Serial.available() > 0 && newData == false) {
+        rc = Serial.read();
+
+        if (recvInProgress == true) {
+            if (rc != endMarker) {
+                receivedChars[ndx] = rc;
+                ndx++;
+                if (ndx >= numChars) {
+                    ndx = numChars - 1;
+                }
+            }
+            else {
+                receivedChars[ndx] = '\0'; // terminate the string
+                recvInProgress = false;
+                ndx = 0;
+                newData = true;
+            }
+        }
+
+        else if (rc == startMarker) {
+            recvInProgress = true;
+        }
+    }
+}
+
+void parseData() {      // split the data into its parts
+
+    char * strtokIndx; // this is used by strtok() as an index
+
+    strtokIndx = strtok(tempChars,",");      // get the first part - the string
+    strcpy(messageFromPC, strtokIndx); // copy it to messageFromPC
+ 
+    strtokIndx = strtok(NULL, ","); // this continues where the previous call left off
+    floatFromPC_1 = atof(strtokIndx);     // convert this part to an integer
+
+    strtokIndx = strtok(NULL, ",");
+    floatFromPC_2 = atof(strtokIndx);     // convert this part to a float
+
+}
+
+void showParsedData() {
+    Serial.print("Message ");
+    Serial.println(messageFromPC);
+    Serial.print("Integer ");
+    Serial.println(floatFromPC_1);
+    Serial.print("Float ");
+    Serial.println(floatFromPC_2);
+}
